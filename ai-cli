@@ -1,0 +1,1066 @@
+#!/bin/bash
+
+set -euo pipefail
+
+DRY_RUN=false
+MODEL_OVERRIDE=""
+PLANNING_HTML=false
+
+# Translate model names between providers
+# Claude: opus, sonnet, haiku
+# Copilot: gpt-4o, gpt-4o-mini, gpt-3.5-turbo, claude-sonnet-4, etc.
+# Codex: gpt-5-codex, gpt-5, o3, etc. (OpenAI models; Claude names fall back to codex default)
+translate_model() {
+  local model="$1"
+  local provider="$2"
+  
+  if [ -z "$model" ]; then
+    echo ""
+    return
+  fi
+  
+  if [ "$provider" = "claude" ]; then
+    # Already Claude model names, pass through
+    echo "$model"
+  elif [ "$provider" = "copilot" ]; then
+    # For copilot, don't translate Claude model names - use copilot's default
+    # Only pass through explicit copilot model names
+    case "$model" in
+      opus|sonnet|haiku)  echo "" ;;  # Use copilot default
+      claude-*)
+        echo "Warning: Full Claude model ID '$model' may not be supported by Copilot. Using Copilot default." >&2
+        echo ""
+        ;;
+      *)  echo "$model" ;;  # Pass through explicit copilot models
+    esac
+  elif [ "$provider" = "cursor" ]; then
+    # For cursor, don't translate Claude model shorthand - use cursor's default
+    # Only pass through explicit cursor model names (e.g. gpt-5, sonnet-4-thinking)
+    case "$model" in
+      opus|sonnet|haiku)  echo "" ;;  # Use cursor default
+      claude-*)
+        echo "Warning: Full Claude model ID '$model' may not be supported by Cursor Agent. Using Cursor default." >&2
+        echo ""
+        ;;
+      *)  echo "$model" ;;  # Pass through explicit cursor models
+    esac
+  elif [ "$provider" = "codex" ]; then
+    # Codex uses OpenAI models (e.g. gpt-5-codex, gpt-5, o3), so Claude
+    # shorthand/IDs have no equivalent — fall back to the codex default.
+    case "$model" in
+      opus|sonnet|haiku)  echo "" ;;  # Use codex default
+      claude-*)
+        echo "Warning: Claude model ID '$model' is not supported by Codex. Using Codex default." >&2
+        echo ""
+        ;;
+      *)  echo "$model" ;;  # Pass through explicit codex models
+    esac
+  else
+    echo "$model"
+  fi
+}
+
+usage() {
+  echo "Usage:"
+  echo "  ai-cli claude \"free prompt\""
+  echo "  ai-cli claude audit \"your request\""
+  echo "  ai-cli claude commit \"your request\""
+  echo "  ai-cli claude debug \"your request\""
+  echo "  ai-cli claude explain \"your request\""
+  echo "  ai-cli claude feature \"your request\""
+  echo "  ai-cli claude fix \"your request\""
+  echo "  ai-cli claude lint \"your request\""
+  echo "  ai-cli claude playwright-debug \"your request\""
+  echo "  ai-cli claude playwright-test \"your request\""
+  echo "  ai-cli claude pr \"your request\""
+  echo "  ai-cli claude refactor \"your request\""
+  echo "  ai-cli claude review \"your request\""
+  echo "  ai-cli claude planning \"your request\""
+  echo "  ai-cli claude suggestions \"your request\""
+  echo "  ai-cli claude test \"your request\""
+  echo "  ai-cli claude types \"your request\""
+  echo ""
+  echo "  ai-cli copilot \"free prompt\""
+  echo "  ai-cli copilot audit \"your request\""
+  echo "  ai-cli copilot commit \"your request\""
+  echo "  ai-cli copilot debug \"your request\""
+  echo "  ai-cli copilot explain \"your request\""
+  echo "  ai-cli copilot feature \"your request\""
+  echo "  ai-cli copilot fix \"your request\""
+  echo "  ai-cli copilot lint \"your request\""
+  echo "  ai-cli copilot playwright-debug \"your request\""
+  echo "  ai-cli copilot playwright-test \"your request\""
+  echo "  ai-cli copilot pr \"your request\""
+  echo "  ai-cli copilot refactor \"your request\""
+  echo "  ai-cli copilot review \"your request\""
+  echo "  ai-cli copilot planning \"your request\""
+  echo "  ai-cli copilot suggestions \"your request\""
+  echo "  ai-cli copilot test \"your request\""
+  echo "  ai-cli copilot types \"your request\""
+  echo ""
+  echo "  ai-cli cursor \"free prompt\""
+  echo "  ai-cli cursor audit \"your request\""
+  echo "  ai-cli cursor commit \"your request\""
+  echo "  ai-cli cursor debug \"your request\""
+  echo "  ai-cli cursor explain \"your request\""
+  echo "  ai-cli cursor feature \"your request\""
+  echo "  ai-cli cursor fix \"your request\""
+  echo "  ai-cli cursor lint \"your request\""
+  echo "  ai-cli cursor playwright-debug \"your request\""
+  echo "  ai-cli cursor playwright-test \"your request\""
+  echo "  ai-cli cursor pr \"your request\""
+  echo "  ai-cli cursor refactor \"your request\""
+  echo "  ai-cli cursor review \"your request\""
+  echo "  ai-cli cursor planning \"your request\""
+  echo "  ai-cli cursor suggestions \"your request\""
+  echo "  ai-cli cursor test \"your request\""
+  echo "  ai-cli cursor types \"your request\""
+  echo ""
+  echo "  ai-cli codex \"free prompt\""
+  echo "  ai-cli codex audit \"your request\""
+  echo "  ai-cli codex commit \"your request\""
+  echo "  ai-cli codex debug \"your request\""
+  echo "  ai-cli codex explain \"your request\""
+  echo "  ai-cli codex feature \"your request\""
+  echo "  ai-cli codex fix \"your request\""
+  echo "  ai-cli codex lint \"your request\""
+  echo "  ai-cli codex playwright-debug \"your request\""
+  echo "  ai-cli codex playwright-test \"your request\""
+  echo "  ai-cli codex pr \"your request\""
+  echo "  ai-cli codex refactor \"your request\""
+  echo "  ai-cli codex review \"your request\""
+  echo "  ai-cli codex planning \"your request\""
+  echo "  ai-cli codex suggestions \"your request\""
+  echo "  ai-cli codex test \"your request\""
+  echo "  ai-cli codex types \"your request\""
+  echo ""
+  echo "Options:"
+  echo "  --dry-run, -d        Show the generated prompt without executing"
+  echo "  --model, -m          Override the default model (e.g., --model haiku; codex: --model gpt-5-codex)"
+  echo "  --planning, -p       Generate planning HTML visualization (off by default)"
+  echo ""
+  echo "Flags can appear before or after the provider:"
+  echo "  ai-cli --model haiku claude review \"...\""
+  echo "  ai-cli claude --model haiku review \"...\""
+  echo ""
+  echo "Default models per command: debug/planning/explain → opus, others → sonnet"
+  echo "(claude names opus/sonnet/haiku are ignored by copilot, cursor and codex, which use their own default;"
+  echo " pass an explicit provider model with --model, e.g. codex: gpt-5-codex)"
+}
+
+if [ "$#" -eq 0 ]; then
+  usage
+  exit 1
+fi
+
+# Parse global flags (--dry-run, --model, --planning) — accepted before provider
+while true; do
+  case "${1:-}" in
+    --dry-run|-d)
+      DRY_RUN=true
+      shift
+      ;;
+    --model|-m)
+      shift
+      MODEL_OVERRIDE="${1:-}"
+      shift || true
+      ;;
+    --planning|-p)
+      PLANNING_HTML=true
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+PROVIDER="${1:-}"
+shift || true
+
+# Also accept flags after provider for backward compatibility
+while true; do
+  case "${1:-}" in
+    --dry-run|-d)
+      DRY_RUN=true
+      shift
+      ;;
+    --model|-m)
+      shift
+      MODEL_OVERRIDE="${1:-}"
+      shift || true
+      ;;
+    --planning|-p)
+      PLANNING_HTML=true
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+COMMAND="${1:-}"
+shift || true
+
+PROMPT="$*"
+
+KNOWN_COMMANDS=("audit" "commit" "debug" "explain" "feature" "fix" "lint" "playwright-debug" "playwright-test" "pr" "refactor" "review" "planning" "suggestions" "test" "types")
+
+if [ -z "$COMMAND" ]; then
+  usage
+  exit 1
+fi
+
+if [[ ! " ${KNOWN_COMMANDS[*]} " =~ " ${COMMAND} " ]]; then
+  PROMPT="$COMMAND $PROMPT"
+  COMMAND="chat"
+fi
+
+if [ -z "${PROMPT// }" ]; then
+  PROMPT="General $COMMAND request"
+fi
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
+
+if [ -z "$REPO_ROOT" ]; then
+  echo "Error: Not inside a git repository"
+  exit 1
+fi
+
+cd "$REPO_ROOT"
+
+# Base branch for diffs: prefer master, fall back to main when master doesn't exist
+BASE_BRANCH="master"
+for candidate in master origin/master main origin/main; do
+  if git rev-parse --verify --quiet "$candidate" >/dev/null; then
+    BASE_BRANCH="$candidate"
+    break
+  fi
+done
+
+# Ensure .ai-private directory exists with proper permissions
+AI_PRIVATE_DIR="$REPO_ROOT/.ai-private"
+if [ ! -d "$AI_PRIVATE_DIR" ]; then
+  mkdir -p "$AI_PRIVATE_DIR"
+  chmod 755 "$AI_PRIVATE_DIR"
+fi
+
+BASE="$REPO_ROOT/CLAUDE.md"
+DEBUG="$AI_PRIVATE_DIR/DEBUG.md"
+REFACTOR="$AI_PRIVATE_DIR/REFACTOR.md"
+REVIEW="$AI_PRIVATE_DIR/REVIEW.md"
+PLANNING="$AI_PRIVATE_DIR/PLANNING.md"
+BUG_HUNTING="$AI_PRIVATE_DIR/BUG-HUNTING.md"
+LEARNED="$AI_PRIVATE_DIR/LEARNED.md"
+PLAYWRIGHT_RULES="$REPO_ROOT/docs/testing/playwright.md"
+
+require_files() {
+  for file in "$@"; do
+    if [ ! -f "$file" ]; then
+      echo "Warning: Missing file $file (skipped)"
+    fi
+  done
+}
+
+existing_files() {
+  for file in "$@"; do
+    [ -f "$file" ] && echo "$file"
+  done
+  return 0
+}
+
+# Reusable instruction for HTML task visualization
+html_task_instruction() {
+  if [ "$PLANNING_HTML" != "true" ]; then
+    echo ""
+    return
+  fi
+  local ts
+  ts=$(date +%Y%m%d-%H%M%S)
+  echo "Based on the above, create a clean, interactive, professional HTML/CSS/JS self-contained '${COMMAND}-${ts}.html' with modern styling (layout, colors, filters, charts). Save to $AI_PRIVATE_DIR/tasks/${COMMAND}-${ts}.html (create folder if needed)."
+}
+
+# Note about paths (used in prompts) - uses absolute path
+PATH_NOTE="IMPORTANT: All output files must be written to $AI_PRIVATE_DIR/ (absolute path)."
+
+# jq filter that turns cursor-agent's --output-format stream-json into readable live text.
+# Only "assistant"/"thinking" events carrying timestamp_ms are true incremental deltas —
+# cursor-agent re-emits a duplicate consolidated event (no timestamp_ms) after each one, which
+# this filter skips to avoid printing every chunk twice.
+cursor_stream_jq_filter() {
+  cat <<'JQ'
+if .type == "thinking" and .subtype == "delta" then .text
+elif .type == "assistant" and (.timestamp_ms != null) then (.message.content[0].text // empty)
+elif .type == "tool_call" and .subtype == "started" then
+  "\n⚙ " + (((.tool_call | to_entries[0].value.args.description) // (.tool_call | to_entries[0].value.description) // "tool call")) + "\n"
+elif .type == "result" then "\n"
+else empty
+end
+JQ
+}
+
+run_ai() {
+  local input="$1"
+  local default_model="${2:-}"
+  local files_display="${3:-}"
+  local prompt_no_static="${4:-$input}"
+  local dynamic_cmds="${5:-}"
+
+  # Use override if set, otherwise use default
+  local internal_model="${MODEL_OVERRIDE:-$default_model}"
+  # Translate model for the provider
+  local resolved_model
+  resolved_model=$(translate_model "$internal_model" "$PROVIDER")
+
+  echo "═══════════════════════════════════════════════════════════════"
+  echo "Provider : $PROVIDER"
+  echo "Command  : $COMMAND"
+  echo "Branch   : $(git branch --show-current)"
+  if [ -n "$internal_model" ]; then
+    if [ "$internal_model" != "$resolved_model" ]; then
+      echo "Model    : $internal_model → $resolved_model"
+    else
+      echo "Model    : $resolved_model"
+    fi
+  else
+    echo "Model    : (default)"
+  fi
+  echo "Dry-run  : $DRY_RUN"
+  echo "Planning : $PLANNING_HTML"
+  echo "═══════════════════════════════════════════════════════════════"
+
+  if [ "$DRY_RUN" = true ]; then
+    echo ""
+    echo "╔═══════════════════════════════════════════════════════════════╗"
+    echo "║                    PROVIDER COMMAND                           ║"
+    echo "╚═══════════════════════════════════════════════════════════════╝"
+    local cmd_prefix=""
+    if [ -n "$files_display" ]; then
+      cmd_prefix="cat $files_display"
+    fi
+    if [ -n "$dynamic_cmds" ]; then
+      if [ -n "$cmd_prefix" ]; then
+        cmd_prefix="{ $cmd_prefix; $dynamic_cmds; }"
+      else
+        cmd_prefix="{ $dynamic_cmds; }"
+      fi
+    fi
+    
+    case "$PROVIDER" in
+      copilot)
+        if [ -n "$cmd_prefix" ]; then
+          if [ -n "$resolved_model" ]; then
+            echo "$cmd_prefix | copilot --model $resolved_model --allow-all-tools --allow-all-paths --add-dir \$REPO_ROOT -p \"<PROMPT>\""
+          else
+            echo "$cmd_prefix | copilot --allow-all-tools --allow-all-paths --add-dir \$REPO_ROOT -p \"<PROMPT>\""
+          fi
+        else
+          if [ -n "$resolved_model" ]; then
+            echo "copilot --model $resolved_model --allow-all-tools --allow-all-paths --add-dir \$REPO_ROOT -p \"<PROMPT>\""
+          else
+            echo "copilot --allow-all-tools --allow-all-paths --add-dir \$REPO_ROOT -p \"<PROMPT>\""
+          fi
+        fi
+        ;;
+      claude)
+        if [ -n "$cmd_prefix" ]; then
+          if [ -n "$resolved_model" ]; then
+            echo "$cmd_prefix | claude --dangerously-skip-permissions --model $resolved_model \"<PROMPT>\""
+          else
+            echo "$cmd_prefix | claude --dangerously-skip-permissions \"<PROMPT>\""
+          fi
+        else
+          if [ -n "$resolved_model" ]; then
+            echo "claude --dangerously-skip-permissions --model $resolved_model \"<PROMPT>\""
+          else
+            echo "claude --dangerously-skip-permissions \"<PROMPT>\""
+          fi
+        fi
+        ;;
+      cursor)
+        if [ -n "$cmd_prefix" ]; then
+          if [ -n "$resolved_model" ]; then
+            echo "$cmd_prefix | cursor-agent --print --force --trust --output-format stream-json --stream-partial-output --model $resolved_model --add-dir \$REPO_ROOT \"<PROMPT>\" | jq -r -j '<stream formatter>'"
+          else
+            echo "$cmd_prefix | cursor-agent --print --force --trust --output-format stream-json --stream-partial-output --add-dir \$REPO_ROOT \"<PROMPT>\" | jq -r -j '<stream formatter>'"
+          fi
+        else
+          if [ -n "$resolved_model" ]; then
+            echo "cursor-agent --print --force --trust --output-format stream-json --stream-partial-output --model $resolved_model --add-dir \$REPO_ROOT \"<PROMPT>\" | jq -r -j '<stream formatter>'"
+          else
+            echo "cursor-agent --print --force --trust --output-format stream-json --stream-partial-output --add-dir \$REPO_ROOT \"<PROMPT>\" | jq -r -j '<stream formatter>'"
+          fi
+        fi
+        ;;
+      codex)
+        local codex_flags="--dangerously-bypass-approvals-and-sandbox --add-dir \$REPO_ROOT"
+        if [ -n "$resolved_model" ]; then
+          codex_flags="--model $resolved_model $codex_flags"
+        fi
+        if [ -n "$cmd_prefix" ]; then
+          echo "$cmd_prefix | codex $codex_flags \"<PROMPT>\""
+        else
+          echo "codex $codex_flags \"<PROMPT>\""
+        fi
+        ;;
+    esac
+    echo ""
+    echo "╔═══════════════════════════════════════════════════════════════╗"
+    echo "║                    <PROMPT> (without static context)          ║"
+    echo "╚═══════════════════════════════════════════════════════════════╝"
+    echo "$prompt_no_static"
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "Prompt length: $(echo "$input" | wc -c | tr -d ' ') chars, $(echo "$input" | wc -l | tr -d ' ') lines"
+    echo "═══════════════════════════════════════════════════════════════"
+    return 0
+  fi
+
+  case "$PROVIDER" in
+    copilot)
+      if [ -n "$resolved_model" ]; then
+        copilot --model "$resolved_model" --allow-all-tools --allow-all-paths --add-dir "$REPO_ROOT" -i "$input"
+      else
+        copilot --allow-all-tools --allow-all-paths --add-dir "$REPO_ROOT" -i "$input"
+      fi
+      ;;
+    claude)
+      if [ -n "$resolved_model" ]; then
+        claude --dangerously-skip-permissions --model "$resolved_model" "$input"
+      else
+        claude --dangerously-skip-permissions "$input"
+      fi
+      ;;
+    cursor)
+      if [ -n "$resolved_model" ]; then
+        cursor-agent --print --force --trust --output-format stream-json --stream-partial-output --model "$resolved_model" --add-dir "$REPO_ROOT" "$input" \
+          | jq -r -j "$(cursor_stream_jq_filter)"
+      else
+        cursor-agent --print --force --trust --output-format stream-json --stream-partial-output --add-dir "$REPO_ROOT" "$input" \
+          | jq -r -j "$(cursor_stream_jq_filter)"
+      fi
+      echo ""
+      ;;
+    codex)
+      if [ -n "$resolved_model" ]; then
+        codex --model "$resolved_model" --dangerously-bypass-approvals-and-sandbox --add-dir "$REPO_ROOT" "$input"
+      else
+        codex --dangerously-bypass-approvals-and-sandbox --add-dir "$REPO_ROOT" "$input"
+      fi
+      ;;
+    *)
+      echo "Error: Unknown provider '$PROVIDER'"
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+base_repo_context() {
+  cat <<EOF
+
+### BRANCH
+$(git branch --show-current 2>/dev/null || true)
+
+### REPO STATUS
+$(git status --short 2>/dev/null || true)
+
+### RECENT COMMITS
+$(git log --oneline -8 2>/dev/null || true)
+
+EOF
+}
+
+changed_files_context() {
+  cat <<EOF
+
+### CHANGED FILES AGAINST MASTER
+$(git diff --name-only ${BASE_BRANCH}...HEAD 2>/dev/null || true)
+
+EOF
+}
+
+# --- Project conventions context (docs/, .claude/rules/) -------------------
+#
+# CLAUDE.md and .claude/rules/*.md use bare "@relative/path" lines as Claude
+# Code's own transclusion syntax. Only the `claude` provider's own process
+# resolves those automatically when it re-reads CLAUDE.md from $REPO_ROOT;
+# copilot/cursor just see the literal "@docs/..." text. These functions
+# resolve the imports in bash so every provider gets the real doc content.
+
+# Absolute-ish path used as a dedupe key so the same doc is never printed
+# twice in one generate_docs_context call (e.g. reached once via CLAUDE.md's
+# own @-list and again via a .claude/rules/*.md that points at the same file).
+_canon_path() {
+  local f="$1"
+  echo "$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)/$(basename "$f")"
+}
+
+_already_resolved() {
+  case $'\n'"$_RESOLVED_PATHS"$'\n' in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Recursively expands "@relative/path" lines into the referenced file's
+# content. Non-"@" lines pass through unchanged. Skips a file already
+# resolved earlier in the same generate_docs_context call (see _RESOLVED_PATHS).
+resolve_at_imports() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+
+  local abs
+  abs=$(_canon_path "$file")
+  _already_resolved "$abs" && return 0
+  _RESOLVED_PATHS="$_RESOLVED_PATHS
+$abs"
+
+  local base_dir
+  base_dir=$(dirname "$file")
+
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ^@(.+)$ ]]; then
+      local ref="${BASH_REMATCH[1]}"
+      local ref_path="$base_dir/$ref"
+      # Tolerate a stale "@dir/file.md" reference left over from moving a doc
+      # into "dir/file/" (e.g. CLAUDE.md's "@docs/testing/jest.md" — the real
+      # file is docs/testing/jest/index.md now, in a dir named without ".md").
+      if [ ! -f "$ref_path" ] && [ -f "${ref_path%.md}/index.md" ]; then
+        ref_path="${ref_path%.md}/index.md"
+      fi
+      if [ -f "$ref_path" ]; then
+        resolve_at_imports "$ref_path"
+        echo ""
+      else
+        echo "$line"
+      fi
+    else
+      echo "$line"
+    fi
+  done < "$file"
+}
+
+# Full expansion of CLAUDE.md -> AGENTS.md + every docs/*.md it references,
+# PLUS every doc referenced by a .claude/rules/*.md rule (react-query.md,
+# css-modules.md, the style variant of feature-flags.md, jest topic guides —
+# these are normally path-triggered, not part of CLAUDE.md's own @-list, but
+# there's no diff to trigger them off here). For commands with no reliable
+# branch diff to scope against (feature: new work not yet reflected in a
+# diff; explain/planning: may need any part of the repo).
+full_docs_context() {
+  resolve_at_imports "$BASE"
+
+  local rules_dir="$REPO_ROOT/.claude/rules"
+  [ -d "$rules_dir" ] || return 0
+
+  local rule_file
+  for rule_file in "$rules_dir"/*.md; do
+    [ -f "$rule_file" ] || continue
+
+    local ref
+    ref=$(grep -m1 -E '^@' "$rule_file" 2>/dev/null || true)
+    [ -n "$ref" ] || continue
+
+    local ref_path="$rules_dir/${ref#@}"
+    [ -f "$ref_path" ] || continue
+
+    local abs
+    abs=$(_canon_path "$ref_path")
+    _already_resolved "$abs" && continue
+
+    echo "### $(basename "$ref_path")"
+    resolve_at_imports "$ref_path"
+    echo ""
+  done
+}
+
+# Cross-references files touched on this branch against each rule's `paths:`
+# glob list in .claude/rules/*.md, and includes only the docs whose rule
+# matched — mirrors Claude Code's own path-triggered rule loading, made
+# explicit so copilot/cursor get the same targeted guidance without paying
+# for the full docs/ corpus on every call.
+smart_docs_context() {
+  echo "### AGENTS.md"
+  cat "$REPO_ROOT/AGENTS.md" 2>/dev/null || true
+  echo ""
+
+  local rules_dir="$REPO_ROOT/.claude/rules"
+  [ -d "$rules_dir" ] || return 0
+
+  local changed_files
+  changed_files="$(git diff --name-only ${BASE_BRANCH}...HEAD 2>/dev/null || true)
+$(git diff --name-only 2>/dev/null || true)
+$(git diff --cached --name-only 2>/dev/null || true)"
+
+  [ -n "${changed_files//[$'\n' ]/}" ] || return 0
+
+  # NOTE: no `globstar` — macOS ships bash 3.2 (no globstar support), and it's
+  # not needed anyway: `[[ str == pattern ]]` isn't pathname expansion, so a
+  # bare `*` already matches "/" without it.
+  shopt -s extglob nullglob
+
+  local rule_file
+  for rule_file in "$rules_dir"/*.md; do
+    [ -f "$rule_file" ] || continue
+
+    local globs
+    globs=$(sed -n '/^paths:/,/^---/p' "$rule_file" 2>/dev/null \
+      | grep -E '^[[:space:]]*-[[:space:]]' \
+      | sed -E "s/^[[:space:]]*-[[:space:]]*['\"]?//; s/['\"]?[[:space:]]*\$//" || true)
+
+    local matched=false
+    local glob f
+    while IFS= read -r glob; do
+      [ -n "$glob" ] || continue
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        # shellcheck disable=SC2053 -- intentional: $glob must stay unquoted
+        # so it's matched as a pattern, not compared as a literal string.
+        if [[ "$f" == $glob ]]; then
+          matched=true
+          break
+        fi
+      done <<< "$changed_files"
+      [ "$matched" = true ] && break
+    done <<< "$globs"
+
+    if [ "$matched" = true ]; then
+      local ref
+      ref=$(grep -m1 -E '^@' "$rule_file" 2>/dev/null || true)
+      if [ -n "$ref" ]; then
+        local ref_path="$rules_dir/${ref#@}"
+        if [ -f "$ref_path" ]; then
+          echo "### $(basename "$ref_path")"
+          resolve_at_imports "$ref_path"
+          echo ""
+        fi
+      fi
+    fi
+  done
+}
+
+# Writes the resolved conventions (mode: "full" or "smart") to a generated
+# file under .ai-private/ and echoes its path, so it flows through the
+# existing file-based static-context mechanism in run(). PID-suffixed so two
+# concurrent ai-cli invocations can't clobber each other's file mid-read;
+# the ".generated-docs-context.md" mirror alongside it is just a fixed-name
+# copy for manual inspection (e.g. opening it in an editor) and isn't read
+# by run() itself.
+generate_docs_context() {
+  local mode="$1"
+  local out_file="$AI_PRIVATE_DIR/.generated-docs-context.$$.md"
+  _RESOLVED_PATHS=""
+
+  {
+    echo "### PROJECT CONVENTIONS (auto-generated, do not edit)"
+    echo ""
+    if [ "$mode" = "full" ]; then
+      full_docs_context
+    else
+      smart_docs_context
+    fi
+  } > "$out_file"
+
+  cp "$out_file" "$AI_PRIVATE_DIR/.generated-docs-context.md" 2>/dev/null || true
+
+  echo "$out_file"
+}
+
+review_context() {
+  cat <<EOF
+
+$(base_repo_context)
+
+$(changed_files_context)
+
+EOF
+}
+
+feature_context() {
+  cat <<EOF
+
+$(base_repo_context)
+
+$(changed_files_context)
+
+### RELEVANT TREE
+$(find . -maxdepth 3 \
+  -not -path "./.git/*" \
+  -not -path "./node_modules/*" \
+  -not -path "./dist/*" \
+  -not -path "./build/*" \
+  -type f | sed 's#^\./##' | head -200)
+
+EOF
+}
+
+refactor_context() {
+  cat <<EOF
+
+$(base_repo_context)
+
+### STAGED FILES
+$(git diff --cached --name-only 2>/dev/null || true)
+
+### UNSTAGED FILES
+$(git diff --name-only 2>/dev/null || true)
+
+### CHANGED FILES AGAINST MASTER
+$(git diff --name-only ${BASE_BRANCH}...HEAD 2>/dev/null || true)
+
+EOF
+}
+
+debug_context() {
+  cat <<EOF
+
+$(base_repo_context)
+
+$(changed_files_context)
+
+### BRANCH DIFF STATS
+$(git diff --stat ${BASE_BRANCH}...HEAD 2>/dev/null || true)
+
+### PACKAGE SCRIPTS
+$(node -e "try { const p=require('./package.json'); console.log(JSON.stringify(p.scripts,null,2)) } catch(e) {}" 2>/dev/null || true)
+
+EOF
+}
+
+planning_context() {
+  cat <<EOF
+
+$(base_repo_context)
+
+$(changed_files_context)
+
+### BRANCH COMMITS
+$(git log ${BASE_BRANCH}..HEAD --oneline 2>/dev/null || true)
+
+### MASTER RECENT
+$(git log ${BASE_BRANCH} --oneline -5 2>/dev/null || true)
+
+### SOURCE FILES
+$(find . -maxdepth 3 -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.js' \) \
+  -not -path "./.git/*" \
+  -not -path "./node_modules/*" \
+  -not -path "./dist/*" \
+  -not -path "./build/*" \
+  | sed 's#^\./##' | head -150)
+
+### FULL TREE
+$(find . -maxdepth 3 -type f \
+  -not -path "./.git/*" \
+  -not -path "*/node_modules/*" \
+  -not -path "*/dist/*" \
+  -not -path "*/.next/*" \
+  -not -path "*/coverage/*" \
+  -not -path "*/build/*" \
+  | sed 's#^\./##' | head -100)
+
+EOF
+}
+
+playwright_debug_context() {
+  cat <<EOF
+
+$(base_repo_context)
+
+$(changed_files_context)
+
+### CHANGED PLAYWRIGHT SPEC FILES
+$(git diff --name-only ${BASE_BRANCH}...HEAD 2>/dev/null | grep -E '\.playwright\.ts$' || echo "No .playwright.ts files changed")
+
+### CHANGED HAR MOCKS (check for stub-shaped bodies baked in by a bad recording)
+$(git diff --name-only ${BASE_BRANCH}...HEAD 2>/dev/null | grep -E '\.har$' || echo "No .har files changed")
+
+### PLAYWRIGHT CONFIG
+$(cat playwright.config.ts 2>/dev/null | head -50 || echo "No playwright.config.ts found")
+
+### PLAYWRIGHT TEST FILES
+$(find . -path "*/playwright/*" -name "*.ts" -type f 2>/dev/null | head -30 || echo "No playwright tests found")
+
+EOF
+}
+
+# Context for authoring a brand-new Playwright E2E test. Unlike
+# playwright_debug_context (analyzing a failing run), this surfaces existing
+# page objects/tests as pattern references and points at the two Confluence
+# docs the team maintains outside this repo (mocking system + known
+# pitfalls) — the providers that support live web fetching (e.g. the claude
+# provider's own WebFetch tool) can pull them directly; others still see the
+# URLs as a pointer to consult manually.
+playwright_test_context() {
+  cat <<EOF
+
+$(base_repo_context)
+
+### EXISTING PAGE OBJECTS (reuse before creating new ones)
+$(find . -path "*/playwright/pages/*" -name "*.ts" -type f 2>/dev/null | sed 's#^\./##' | head -40 || echo "No page objects found")
+
+### EXISTING PLAYWRIGHT TESTS (pattern reference)
+$(find . -path "*/playwright/tests/*" -name "*.playwright.ts" -type f 2>/dev/null | sed 's#^\./##' | head -40 || echo "No existing tests found")
+
+### EXTERNAL DOCUMENTATION (fetch these if your tooling supports it; otherwise apply their well-known conventions)
+- Playwright Mocking System: https://favorengineering.atlassian.net/wiki/spaces/EN/pages/4148592781/Playwright+Mocking+System
+- Playwright Pitfalls and How to Tackle these Issues: https://favorengineering.atlassian.net/wiki/spaces/EN/pages/4146823372/Playwright+Pitfalls+and+How+to+Tackle+these+Issues
+
+EOF
+}
+
+run() {
+  local instruction="$1"
+  local dynamic_context="$2"
+  local model="${3:-}"
+  local dynamic_cmds="${4:-}"
+  shift 4 || true
+
+  local files
+  files=$(existing_files "$@")
+
+  if [ -z "$files" ]; then
+    echo "Warning: No valid context files found for this command (skipped) — continuing without them."
+  fi
+
+  # Execute dynamic commands and capture output into context (live mode only)
+  if [ -n "$dynamic_cmds" ] && [ "$DRY_RUN" = false ]; then
+    local dynamic_cmd_output
+    dynamic_cmd_output=$(eval "$dynamic_cmds" 2>&1 || true)
+    if [ -n "$dynamic_cmd_output" ]; then
+      dynamic_context="$dynamic_context
+
+### COMMAND OUTPUT
+\`\`\`
+$dynamic_cmd_output
+\`\`\`"
+    fi
+  fi
+
+  # Get relative file paths for display
+  local files_display
+  files_display=$(echo "$files" | sed "s|$REPO_ROOT/||g" | tr '\n' ' ')
+
+  # Split $files (newline-separated) into an array so a path containing a
+  # space still works — a bare "cat $files" word-splits on whitespace and
+  # silently drops/mismatches any such path, masked by the "|| true" below.
+  local files_arr=()
+  while IFS= read -r f; do
+    [ -n "$f" ] && files_arr+=("$f")
+  done <<< "$files"
+
+  # Guard the zero-files case explicitly: "cat" with no arguments reads
+  # stdin and blocks, it doesn't just produce empty output.
+  local static_context=""
+  if [ "${#files_arr[@]}" -gt 0 ]; then
+    static_context="$(cat "${files_arr[@]}" 2>/dev/null || true)"
+  fi
+
+  local full_prompt="
+  ### TASK
+  $instruction
+
+  ### STATIC CONTEXT
+  $static_context
+
+  ### DYNAMIC CONTEXT
+  $dynamic_context
+
+  ### USER REQUEST
+  $PROMPT
+  "
+
+  # Prompt without static context (for dry-run display)
+  local prompt_no_static="
+  ### TASK
+  $instruction
+
+  ### DYNAMIC CONTEXT
+  $dynamic_context
+
+  ### USER REQUEST
+  $PROMPT
+  "
+
+  run_ai "$full_prompt" "$model" "$files_display" "$prompt_no_static" "$dynamic_cmds"
+}
+
+case "$COMMAND" in
+  chat)
+    run_ai "$PROMPT"
+    ;;
+
+  audit)
+    require_files "$BUG_HUNTING"
+    DOCS_FILE=$(generate_docs_context smart)
+    run "1) Review the current source-control changes (staged, unstaged, and against $BASE_BRANCH) against the criteria in $AI_PRIVATE_DIR/BUG-HUNTING.md and the project conventions included above. 2) Identify bugs, inefficiencies, and unclear code introduced by these changes. 3) Avoid modifying or refactoring code external to this branch's changes against $BASE_BRANCH. 5) Write a summary of findings and fixes applied to $AI_PRIVATE_DIR/REVIEW.md (if exists, overwrite), grouped by severity." \
+      "$(refactor_context)" \
+      "sonnet" \
+      "" \
+      "$BUG_HUNTING" "$DOCS_FILE"
+    ;;
+
+  debug)
+    require_files "$DEBUG"
+    DOCS_FILE=$(generate_docs_context smart)
+    run "1) Root cause analysis, 2) Minimal reproduction steps, 3) Smallest safe fix with code changes, 4) Regression tests to prevent recurrence, 5) Write findings to $AI_PRIVATE_DIR/REVIEW.md (if exists, overwrite) with actionable suggestions grouped by severity. $(html_task_instruction) $PATH_NOTE. 6) Do NOT modify source files." \
+      "$(debug_context)" \
+      "opus" \
+      "" \
+      "$DEBUG" "$DOCS_FILE"
+    ;;
+
+  feature)
+    require_files "$PLANNING"
+    DOCS_FILE=$(generate_docs_context full)
+    run "1) Implement the feature specified in $AI_PRIVATE_DIR/PLANNING.md. 2) Follow the project conventions included above under PROJECT CONVENTIONS. 3) Write clean, tested code matching existing patterns. 4) Create or update unit tests. $PATH_NOTE" \
+      "$(feature_context)" \
+      "" \
+      "" \
+      "$PLANNING" "$DOCS_FILE"
+    ;;
+
+  refactor)
+    require_files "$REVIEW"
+    DOCS_FILE=$(generate_docs_context smart)
+    run "1) Apply the refactoring described in $AI_PRIVATE_DIR/REVIEW.md. 2) Preserve existing behavior while improving code quality. 3) Follow the project conventions included above under PROJECT CONVENTIONS. 4) Ensure all tests pass. 5) Create a refactoring summary inside $AI_PRIVATE_DIR/REFACTOR.md (if exists, overwrite). $PATH_NOTE" \
+      "$(refactor_context)" \
+      "" \
+      "" \
+      "$REVIEW" "$DOCS_FILE"
+    ;;
+
+  review)
+    require_files "$REVIEW" "$LEARNED"
+    DOCS_FILE=$(generate_docs_context smart)
+    run "1) Review changed files against $BASE_BRANCH. 2) Check for: bugs, style violations, missing tests, performance issues, security concerns — per the project conventions included above under PROJECT CONVENTIONS. 3) Keep in mind $AI_PRIVATE_DIR/LEARNED.md (included above) about old reviews. 4) Write findings to $AI_PRIVATE_DIR/REVIEW.md (if exists, overwrite) with actionable suggestions grouped by severity. 5) $(html_task_instruction) $PATH_NOTE. 6) Do NOT modify source files." \
+      "$(review_context)" \
+      "" \
+      "" \
+      "$REVIEW" "$LEARNED" "$DOCS_FILE"
+    ;;
+
+  planning)
+    require_files "$PLANNING"
+    DOCS_FILE=$(generate_docs_context full)
+    run "1) Create an implementation plan from the custom prompt, following the project conventions included above under PROJECT CONVENTIONS. 2) Do NOT modify source files. 3) Output: a) Architecture overview, b) Files to create/modify, c) Risks and mitigations, d) Implementation order, e) Test strategy. 4) Split the approach in small PRs with tested fatures, according our PR size convention. 5) Write the plan to $AI_PRIVATE_DIR/PLANNING.md. 5) $(html_task_instruction) $PATH_NOTE" \
+      "$(planning_context)" \
+      "opus" \
+      "" \
+      "$PLANNING" "$DOCS_FILE"
+    ;;
+
+  fix)
+    require_files "$REVIEW"
+    DOCS_FILE=$(generate_docs_context smart)
+    run "1) Fix the bugs and improvements from $AI_PRIVATE_DIR/REVIEW.md. 2) Follow the project conventions included above under PROJECT CONVENTIONS. 3) Avoid modifying or refactoring code external to this branch changes against $BASE_BRANCH." \
+      "$(review_context)" \
+      "sonnet" \
+      "" \
+      "$REVIEW" "$DOCS_FILE"
+    ;;
+
+  suggestions)
+    require_files "$BASE"
+    pr_info=$(gh pr view --json number,url,title 2>/dev/null || echo "No open PR found")
+    run "1) Use github mcp to get the fix suggestions comments from this branch PR. 2) Create a fix plan based on the suggestions. 3) Write into $AI_PRIVATE_DIR/REVIEW.md (if exists, overwrite). 4) Ensure all tests pass. $PATH_NOTE" \
+      "$(review_context)
+
+### CURRENT PR
+$pr_info" \
+      "sonnet" \
+      "" \
+      "$BASE"
+    ;;
+
+  commit)
+    GIT_DOC="$REPO_ROOT/docs/workflow/git.md"
+    require_files "$GIT_DOC"
+    run "1) Generate a commit message for the staged changes, following the convention in docs/workflow/git.md included above: format \`[TICKET-ID] type: description\`, imperative mood, under 80 characters, types feat/fix/refactor/docs/test/chore, no Co-Authored-By trailer. 2) Extract the ticket ID from the branch name given in the context below. 3) Return ONLY the commit message, nothing else." \
+      "$(cat <<EOF
+
+### BRANCH
+$(git branch --show-current 2>/dev/null || true)
+
+### STAGED DIFF
+$(git diff --cached 2>/dev/null || true)
+
+EOF
+)" \
+      "sonnet" \
+      "" \
+      "$GIT_DOC"
+    ;;
+
+  pr)
+    PR_DOC="$REPO_ROOT/.github/PULL_REQUEST_TEMPLATE.md"
+    require_files "$PR_DOC"
+    run "1) Generate a PR description for the changes in this branch against $BASE_BRANCH, following the structure of .github/PULL_REQUEST_TEMPLATE.md included above (Jira Link, What is changing?, How is this tested?, OWASP Top 10 Checklist). 2) Extract the ticket ID from the branch name (in the context below) for the Jira Link section. 3) Use markdown formatting." \
+      "$(review_context)" \
+      "sonnet" \
+      "" \
+      "$PR_DOC"
+    ;;
+
+  test)
+    require_files "$BASE"
+    run "1) Analyze the test output. 2) Focus on the root cause, not just making tests pass. 3) Suggest fixes. $PATH_NOTE" \
+      "$(review_context)" \
+      "sonnet" \
+      "npm run test" \
+      "$BASE"
+    ;;
+
+  types)
+    DOCS_FILE=$(generate_docs_context smart)
+    run "1) Fix TypeScript errors in the changed files. 2) Do not use 'any' - use \$TSFixMe with a comment if truly unavoidable. 3) Follow the project conventions included above under PROJECT CONVENTIONS." \
+      "$(review_context)" \
+      "sonnet" \
+      "" \
+      "$DOCS_FILE"
+    ;;
+
+  lint)
+    DOCS_FILE=$(generate_docs_context smart)
+    run "1) Analyze the lint output and fix ESLint and Prettier issues in the changed files. 2) Follow the project conventions included above under PROJECT CONVENTIONS." \
+      "$(review_context)" \
+      "sonnet" \
+      "npm run check 2>&1 || true" \
+      "$DOCS_FILE"
+    ;;
+
+  playwright-debug)
+    DOCS_FILE=$(generate_docs_context smart)
+    run "1) Analyze the Playwright E2E test output to identify failures introduced by this branch. 2) Compare changed files against $BASE_BRANCH to determine if failures are related to branch changes. 3) For each failure: identify root cause, affected component, and suggest a fix. 4) If mocks are stale or API responses changed, note which HAR files need updating. 5) Separately, review the CHANGED PLAYWRIGHT SPEC FILES for authoring patterns that risk corrupting the HAR on a future UPDATE_MOCKS recording, per the 'Stubs are disabled while recording' and 'Common leak stubs' sections of docs/testing/playwright.md included above — specifically: shouldUpdate computed inside the test body instead of hoisted to test.describe scope and passed via test.use (defeats the isRecording guard), route registration order that could shadow the intended mock (Playwright resolves LIFO), missing ignoreParams on routes with non-deterministic query params, and — if any CHANGED HAR MOCKS are listed above — stub-shaped bodies baked into them (e.g. '{\"total_matches\":0,\"results\":[]}', '{\"item_label_assignments\":{},\"labels\":[]}', '{\"feature_spotlights\":[]}') that should be a real recorded response instead. Report this as its own 'HAR Recording Risks' section, separate from runtime failures, even when nothing is currently failing. 6) Write findings to $AI_PRIVATE_DIR/REVIEW.md with actionable fixes grouped by severity. $PATH_NOTE" \
+      "$(playwright_debug_context)" \
+      "sonnet" \
+      "npm run playwright 2>&1 || true" \
+      "$DOCS_FILE"
+    ;;
+
+  playwright-test)
+    require_files "$PLAYWRIGHT_RULES"
+    DOCS_FILE=$(generate_docs_context smart)
+    run "1) Write a new Playwright E2E test for the function/flow described in the USER REQUEST below. 2) Follow docs/testing/playwright.md included above under STATIC CONTEXT exactly: import test/expect from playwright/helpers/fixtures, hoist shouldUpdate to test.describe scope, use the mock fixture with HAR files under playwright/mocks/, pick the right storageState (basicUser/newUser) or leave unauthenticated as appropriate. 3) Before writing, consult the two external documentation links included under DYNAMIC CONTEXT (Playwright Mocking System, Playwright Pitfalls) for the team's current mocking conventions and known failure modes — fetch them if your tooling has web access. 4) Reuse an existing page object from playwright/pages/ (listed above) if the flow already has one; otherwise create a new page object following the same structure. 5) Save the new test under app/playwright/tests/<authenticated|unauthenticated>/<domain>/<Name>.playwright.ts. 6) Do not fabricate HAR fixture content — if a new HAR mock is required, note that it must be recorded via UPDATE_MOCKS against the shared automation@fv.rs QA account rather than hand-written. $PATH_NOTE" \
+      "$(playwright_test_context)" \
+      "sonnet" \
+      "" \
+      "$PLAYWRIGHT_RULES" "$DOCS_FILE"
+    ;;
+
+  explain)
+    DOCS_FILE=$(generate_docs_context full)
+    run "1) Explain the code, architecture, or pattern. 2) Be concise but thorough. 3) Include relevant file references." \
+      "$(feature_context)" \
+      "opus" \
+      "" \
+      "$DOCS_FILE"
+    ;;
+
+  *)
+    usage
+    exit 1
+    ;;
+esac
