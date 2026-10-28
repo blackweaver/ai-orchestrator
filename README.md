@@ -1,14 +1,17 @@
-# AI-CLI — AI-Powered Development Workflow
+# AI Development Workflow Orchestrator — Personal Project
 
-> A command-line orchestrator that supercharges Claude Code, GitHub Copilot CLI, Cursor Agent CLI, and Codex CLI with structured workflows for debugging, code reviews, feature planning, refactoring, and more.
+Designed and developed a provider-agnostic CLI orchestration tool integrating Claude Code, GitHub Copilot, Cursor Agent, and OpenAI Codex.
+
+- Built 16 structured workflows covering debugging, code reviews, feature planning, refactoring, and automated testing.
+- Implemented task-specific context engineering using Git metadata, repository structure, and project conventions.
+- Integrated AI-assisted workflows with GitHub CLI, Playwright, and existing development tooling.
+- Designed reusable workflows to improve development efficiency and reduce unnecessary context consumption.
 
 ---
 
-## What is AI-CLI?
+## Technologies
 
-AI-CLI is a bash script that acts as an intelligent middleware between you and AI coding assistants (Claude Code CLI, GitHub Copilot CLI, Cursor Agent CLI, and Codex CLI). Instead of manually crafting prompts and gathering context every time, AI-CLI automatically collects relevant repository information, combines it with your project's documentation, and sends structured, context-rich prompts to your preferred AI provider.
-
-Think of it as a **context orchestrator** — it knows what information each type of task needs and assembles the perfect prompt automatically.
+Bash, Git, AI Coding Agents, LLM Orchestration, Context Engineering, GitHub CLI, Playwright.
 
 ---
 
